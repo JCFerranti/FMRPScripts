@@ -1,0 +1,21 @@
+#!/bin/csh 
+if (( "$1" == "") || ("$2" == "")) then
+  echo ""
+  echo "Usage: resample fileroot resample_fileroot (no extensions)[brain] (if brain not label}"
+  echo ""
+  echo ""
+  echo "resample huysu1_lbl_t1 huysu1_e2_nu"
+  echo ""
+  echo ""
+  exit
+endif
+
+if ("$3" == "brain") then
+  echo "resample brain file"
+  mincresample -nearest {$1}.mnc.gz {$1}_res.mnc -like {$2}.mnc.gz
+else
+  echo "resample label file"
+  mincresample -nearest {$1}.mnc {$1}_res.mnc -like {$2}.mnc.gz
+endif
+echo "Compactando..."
+gzip -f --best -vv *mnc

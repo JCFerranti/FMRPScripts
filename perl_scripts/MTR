@@ -1,0 +1,2 @@
+mincmath $1_d1.mnc.gz $1_d2.mnc.gz $1_mt.mnc -pd -const $2
+gzip $1_mt.mnc

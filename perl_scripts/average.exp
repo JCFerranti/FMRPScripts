@@ -1,0 +1,22 @@
+# Initialize counters
+s0 = s1 = s2 = 0;
+
+# Loop over values
+for {i in [0:len(A))} {
+   v=A[i];
+
+   # Avoid voxels with value less than 0
+   if (v > 0) {
+      s0 = s0 + 1;
+      s1 = s1 + v;
+      s2 = s2 + v*v;
+   }
+
+};
+
+# Compute the std deviation
+stdev = (s0 > 1) ? sqrt((s2 - s1*s1/s0) / (s0-1)) :
+                     (s0 > 0) ? 0 : NaN;
+
+# Compute the mean
+mean  = (s0 > 0) ? s1 / s0 : NaN;

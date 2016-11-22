@@ -1,0 +1,1051 @@
+#!/usr/bin/perl
+
+use File::Basename;
+use Getopt::Tabular;
+
+use Shell; 
+
+my $sh = Shell->new();
+
+# Global variable for indicating byte order
+#@vectorpasta = glob("./*");
+#$new_seq = @vectorpasta;
+$new_seq = 22;
+$cur_file;
+$Little_endian = unpack("c",substr(pack("s",1),0,1));
+%Unpack_codes = ('a', 1, 'A', 1, 
+                 's', 2, 'S', 2,
+                 'i', 4, 'I', 4,
+                 'f', 4, 'd', 8,
+                 );
+                 
+
+sub numeric_order { $a <=> $b;}
+
+# Subroutine to clean up files and exit
+sub cleanup_and_die {
+
+    # Get message to print and exit status
+    local($message,$status) = @_;
+    if (!defined($status)) {$status = 0;}
+    if (defined($message)) {
+        print STDERR $message;
+        if ($message !~ /\n$/) {print STDERR "\n";}
+    }
+
+    $SIG{'INT'}  = 'IGNORE';
+    $SIG{'TERM'} = 'IGNORE';
+    $SIG{'QUIT'} = 'IGNORE';
+    # Check for temp files
+    if (defined($tmpdir) && -e $tmpdir) {
+        print STDERR "Cleaning up temporary files.\n";
+        system "rm -rf $tmpdir";
+    }
+
+    exit($status);
+}
+
+# Subroutine to execute commands and check return status
+sub execute {
+    if ($print_execution_statements) {
+        print join(' ',@_),"\n";
+    }
+    my $status = system @_;
+    if ($status != 0) {
+        &cleanup_and_die("Error executing command \"".join(" ",@_)."\".\n",
+                         $status);
+    }
+}
+
+# Subroutine to remove a list of files
+sub remove_file {
+    unlink @_;
+}
+
+# Subroutine to create a temporary directory (global variable $tmpdir
+# is created)
+sub create_tmpdir {
+    my $subdir;
+    if (scalar(@_) >= 1) {
+        $subdir = $_[0];
+    }
+    else {
+        $subdir = $$;
+    }
+    if (defined($ENV{TMPDIR})) {
+        $tmpdir = $ENV{TMPDIR};
+    }
+    else {
+        $tmpdir = "/usr/tmp";
+    }
+    $tmpdir .= "/$subdir";
+    mkdir($tmpdir,0777) || die "Unable to create directory $tmpdir: $!";
+    $SIG{'INT'}  = 'cleanup_and_die';
+    $SIG{'TERM'} = 'cleanup_and_die';
+    $SIG{'QUIT'} = 'cleanup_and_die';
+}
+
+# Subroutine to get a direction cosine from a vector, correcting for
+# magnitude and direction if needed (the direction cosine should point
+# along the positive direction of the nearest axis)
+sub get_dircos {
+    if (scalar(@_) != 3) {
+        die "Argument error in get_dircos\n";
+    }
+    my ($xcos, $ycos, $zcos) = @_;
+
+    # Get magnitude
+    my $mag = sqrt($xcos**2 + $ycos**2 + $zcos**2);
+    if ($mag <= 0) {$mag = 1};
+
+    # Make sure that direction cosine is pointing along positive axis
+    my $max = $xcos;
+    if (abs($ycos) > abs($max)) {$max= $ycos;}
+    if (abs($zcos) > abs($max)) {$max= $zcos;}
+    if ($max < 0) {$mag *= -1;}
+
+    # Correct components
+    $xcos /= $mag;
+    $ycos /= $mag;
+    $zcos /= $mag;
+
+    return ($xcos, $ycos, $zcos);
+}
+
+# Subroutine to add an optional attribute to an array
+sub add_optional_attribute {
+    if (scalar(@_) != 4) {
+        die "Argument error in add_optional_attribute\n";
+    }
+    my ($array, $type, $name, $value) = @_;
+    my $key;
+
+    if ($type eq "string") {$key = "-sattribute";}
+    elsif ($type eq "double") {$key = "-dattribute";}
+    elsif ($type eq "none") {$key = "-attribute";}
+    else {die "Unknown type \"$type\" in add_optional_attribute\n";}
+
+    if (length($value) > 0) {
+        push(@$array, $key, $name."=".$value);
+    }
+}
+
+# Subroutine to create a minc file
+sub create_mincfile {
+    
+	$imag=0;
+	if (scalar(@_) != 6) {
+        die "Argument error in create_mincfile";
+    }
+    my ($mincfile, $file_list, $mincinforef, $image_list, $echo, $tolerance) = @_;
+
+    my %mincinfo;
+    %mincinfo = %$mincinforef;
+
+    # Sort images by z position
+	
+    my (%pos_to_image, @positions, $cur_slicepos);
+    foreach my $cur_image (split($;, $image_list)) {
+        $cur_slicepos = $mincinfo{$cur_image, 'slicepos'};
+        if (!defined($pos_to_image{$cur_slicepos})) {
+            $pos_to_image{$cur_slicepos} = $cur_image;
+            push(@positions, $cur_slicepos);
+        }
+        else {
+           warn "Duplicate slice position: " .
+              "ignoring file $${file_list{$cur_image}}\n";
+			  $sh->mkdir("SE00".$new_seq);
+			  my $cur_file = $file_list{$cur_image};
+			  warn "\n\n\n*******".$cur_file."*******\n\n\n";
+			  $sh->mv(" ".$cur_file." ./SE00".$new_seq."/IM00".$imag);
+              $imag=$imag+1; 
+		}
+    }
+    @positions = sort(numeric_order @positions);
+
+    # Get step size and get nslices and ordered list of images
+    my (@image_list, $slicestep, $nslices, $slicestart, $slicerange);
+    if (scalar(@positions) > 1) {
+
+        # Find smallest step size
+        $slicestep = $positions[1] - $positions[0];
+        my @difflist;
+        foreach my $i (2..$#positions) {
+            my $diff = $positions[$i] - $positions[$i-1];
+            push(@difflist, $diff);
+            if (($diff < $slicestep) && ($diff > 0) && ($diff > $slicestep-$tolerance)) {
+                $slicestep = $diff;
+            }
+        }
+
+        # Find average step, accounting for stepping over multiple slices
+        # (based on rounded ratio to smallest step)
+        my $ndiffs = 0;
+        my $totaldiff = 0;
+        foreach my $diff (@difflist) {
+           $totaldiff += $diff;
+           $ndiffs += int($diff/$slicestep + 0.5);
+        }
+        if ($ndiffs > 0) {
+           $slicestep = $totaldiff / $ndiffs;
+        }
+
+        # Work out number of slices and get the ordered list of images
+        if ($slicestep <= 0) {
+            $nslices = scalar(@positions);
+            $slicestep = 1;
+            @image_list = @pos_to_image{@positions};
+        }
+        else {
+            my $first_image = $pos_to_image{$positions[0]};
+            my $last_image = $pos_to_image{$positions[$#positions]};
+            $slicerange = $mincinfo{$last_image, 'slicepos'} -
+                $mincinfo{$first_image, 'slicepos'};
+            $nslices = int($slicerange / $slicestep + 1.5);
+
+            # Improve accuracy of $slicestep
+            $slicestep = $slicerange / ($nslices - 1);
+            foreach my $i (0..$nslices) {
+                $image_list[$i] = '';
+            }
+            foreach my $position (@positions) {
+                my $slice = int(($position - $positions[0]) / $slicestep + 0.5);
+                $image_list[$slice] = $pos_to_image{$position};
+            }
+        }
+    }
+    else {
+        $slicestep = 1;
+        $nslices = 1;
+        @image_list = @pos_to_image{@positions};
+    }
+    $slicestart = $positions[0];
+
+    # Check for existence of file - create a new name if it exists
+    my $filebase;
+    if ($mincfile =~ /^(.*)\.mnc$/) {
+        $filebase = $1;
+    }
+    else {
+        $filebase = $mincfile;
+    }
+    my $version = 1;
+    my @glob;
+    while (scalar(@glob=<$mincfile*>) > 0) {
+        $version++;
+        $mincfile = $filebase."_version$version.mnc";
+        print STDERR "Minc file already exists. Trying name \"$mincfile\".\n";
+    }
+
+    # Set up rawtominc command
+
+    # Dimension info
+    my $pixel_size = $mincinfo{'pixel_size'};
+    my $nrows = $mincinfo{'height'};
+    my $ncols = $mincinfo{'width'};
+    my $xstep = $mincinfo{'colstep'};
+    my $ystep = $mincinfo{'rowstep'};
+    my $zstep = $slicestep;
+    my $colstart = $mincinfo{'colstart'}+0;
+    my $rowstart = $mincinfo{'rowstart'}+0;
+
+    # Orientation
+    my ($xstart, $ystart, $zstart);
+    my %world_axes;
+    my $orient_flag = $mincinfo{'orientation'};
+    if ($orient_flag eq 'sagittal') {    # Sagittal
+        ($ystep, $zstep, $xstep) = 
+            ($mincinfo{'colstep'}, $mincinfo{'rowstep'}, $slicestep);
+        ($ystart, $zstart, $xstart) = ($colstart, $rowstart, $slicestart);
+        $orientation = "-sagittal";
+        %world_axes = ('col', 'y', 'row', 'z', 'slc', 'x');
+    }
+    elsif ($orient_flag eq 'coronal') { # Coronal
+        ($xstep, $zstep, $ystep) = 
+            ($mincinfo{'colstep'}, $mincinfo{'rowstep'}, $slicestep);
+        ($xstart, $zstart, $ystart) = ($colstart, $rowstart, $slicestart);
+        $orientation = "-coronal";
+        %world_axes = ('col', 'x', 'row', 'z', 'slc', 'y');
+    }
+    else {                      # Transverse
+        ($xstep, $ystep, $zstep) = 
+            ($mincinfo{'colstep'}, $mincinfo{'rowstep'}, $slicestep);
+        ($xstart, $ystart, $zstart) = ($colstart, $rowstart, $slicestart);
+        $orientation = "-transverse";
+        %world_axes = ('col', 'x', 'row', 'y', 'slc', 'z');
+    }
+    my @dircos_options = ();
+    foreach my $axis ('col', 'row', 'slc') {
+        if (defined($mincinfo{"${axis}_dircos_x"})) {
+            push(@dircos_options,"-${world_axes{$axis}}dircos");
+            foreach $component ('x', 'y', 'z') {
+                push(@dircos_options, $mincinfo{"${axis}_dircos_$component"});
+            }
+        }
+    }
+
+    # Optional attributes
+    my @optional_attributes = ();
+    &add_optional_attribute(\@optional_attributes, "double",
+                            "acquisition:repetition_time", $mincinfo{'tr'});
+    &add_optional_attribute(\@optional_attributes, "double",
+                            "acquisition:echo_time", $mincinfo{'te',$echo});
+    &add_optional_attribute(\@optional_attributes, "double",
+                            "acquisition:inversion_time", $mincinfo{'ti'});
+    &add_optional_attribute(\@optional_attributes, "double",
+                            "acquisition:flip_angle", $mincinfo{'mr_flip'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "acquisition:scanning_sequence", 
+                            $mincinfo{'scan_seq'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "study:study_id", $mincinfo{'exam'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "study:acquisition_id", $mincinfo{'series'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "study:start_time", $mincinfo{'start_time'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "study:institution", $mincinfo{'institution'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "patient:birthdate", 
+                            $mincinfo{'patient_birthdate'});
+    &add_optional_attribute(\@optional_attributes, "double",
+                            "patient:age", $mincinfo{'patient_age'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "patient:sex", $mincinfo{'patient_sex'});
+    &add_optional_attribute(\@optional_attributes, "string",
+                            "patient:identification", $mincinfo{'patient_id'});
+
+    # Check for history
+    if (length($history) > 0) {
+       &add_optional_attribute(\@optional_attributes, "string",
+                               ":history", $mincinfo{'history'});
+    }
+
+    # GE specific stuff
+    my @ge_specific_attributes = ();
+    &add_optional_attribute(\@ge_specific_attributes, "string",
+                            "ge_mrimage:pseq", $mincinfo{'ge_pseq'});
+    &add_optional_attribute(\@ge_specific_attributes, "string",
+                            "ge_mrimage:pseqmode", $mincinfo{'ge_pseqmode'});
+
+    # Dicom specific stuff
+    my @dicom_specific_attributes = ();
+    my @elements = sort(grep(/^dicom_/, keys(%mincinfo)));
+    foreach my $element (@elements) {
+       &add_optional_attribute(\@dicom_specific_attributes, "string",
+                              $element, $mincinfo{$element});
+    }
+
+    # Run rawtominc with appropriate arguments
+    $| = 1;
+    my @typeinfo;
+    if ($mincinfo{'pixel_size'} == 1) {
+       @typeinfo = ("-byte", "-unsigned", "-range", "0", "255");
+    }
+    else {
+       @typeinfo = ("-short", "-signed",  "-range", "0", "4095");
+    }
+
+    my @swab_options = ();
+    if(!$Little_endian xor $Image_is_big_endian) {
+	@swab_options = ('-swap_bytes');
+    }
+
+    my @minccommand = 
+        ("rawtominc", $mincfile, $nslices, $nrows, $ncols, "-noclobber",
+         "-scan_range", @typeinfo, $orientation,
+         "-xstep", $xstep, "-ystep", $ystep, "-zstep", $zstep,
+         "-xstart", $xstart, "-ystart", $ystart, "-zstart", $zstart,
+         '-input', "$tmpdir/input_raw",
+         @dircos_options,
+	 @swab_options,
+ #        "-mri", 
+         "-attribute", "patient:full_name=".$mincinfo{'patient_name'},
+         @optional_attributes,
+         @ge_specific_attributes,
+         @dicom_specific_attributes
+         );
+      
+    # create temporary file
+    open(MINC, ">$tmpdir/input_raw");
+
+    # Get keys for machine specific file info
+    my (@specific_keys, %specific_keys);
+    undef(%specific_keys);
+    foreach my $key (keys(%mincinfo)) {
+        $key =~ /$;specific$;([^$;]*)$/;
+        $specific_keys{$1} = '';
+    }
+    @specific_keys = keys(%specific_keys);
+
+    # Loop through slices
+    foreach my $slice (0..$nslices-1) {
+
+        # Get image number
+        my $cur_image = $image_list[$slice];
+
+        # Get file name
+        my $cur_file = $file_list{$cur_image};
+
+        # Print log message
+        if (length($cur_file) > 0) {
+            print STDERR 
+                "Getting data from file \"$cur_file\" for slice $slice.\n";
+        }
+        else {
+            print STDERR "Using blank image for slice $slice ($cur_image:$cur_file).\n";
+        }
+
+        # Set up variables for getting the image
+        my $image_data_len = $nrows * $ncols * $pixel_size;
+
+        # Read the image (if not defined, create a blank image)
+	my $image_data;
+        if (length($cur_file) <= 0) {
+            $image_data = pack("x$image_data_len",());
+        }
+        else {
+            # Get machine specific file info 
+	    my %specific_file_info;
+            undef(%specific_file_info);
+            foreach $key (@specific_keys) {
+                $specific_file_info{$key} = 
+                    $mincinfo{$cur_image, 'specific', $key};
+            }
+
+	    # read image data from file
+	    my $dicom = DICOM->new();
+	    $dicom->fill($cur_file, $Image_is_big_endian);
+	    # PixelData field in DICOM = 0x7FE0, 0x0010
+	    $image_data = $dicom->value('7FE0', '0010');
+	    
+            if (length($image_data) == 0) {
+                warn "Error reading image from \"$cur_file\"\n";
+                if ($ignore_image_errors) {
+                    warn "Using blank image instead.\n";
+                    $image_data = pack("x$image_data_len",());
+                }
+                else {
+                    close(MINC);
+                    return;
+                }
+            }
+        }
+
+        # Write out the image
+        print MINC $image_data;
+    } # end foreach slice
+
+    # Close the minc file
+    close(MINC);
+    if ($? != 0) {
+        &cleanup_and_die("Error or signal while writing raw_data\n", $?);
+    }
+    
+    # create the mincfile from the temporary raw data.
+    print STDOUT "@minccommand\n" if $verbose;
+    system(@minccommand) == 0 or &cleanup_and_die("Error or signal in rawtominc.\n", $?);
+    
+    return $mincfile;
+}
+
+# Routine to get argument values
+sub get_arguments {
+
+    my ($argsref, @format_specific_options) = @_;
+
+    # set the help and usage messages
+    my $prog = basename($0);
+    my $Help = <<HELP;
+$prog converts DICOM data in a semi-intelligent way into one or more minc files.
+HELP
+    my $Usage = <<USAGE;
+usage: $prog <outputdir> [<file1> <file2> ...] [options]
+$prog -help to list options
+USAGE
+      
+    &Getopt::Tabular::SetHelp ($Help, $Usage);
+      
+      
+    # Set default values
+    my $outputdir = undef;
+    my @input_list = ();
+    my $do_compression = 0;
+    my $ignore_image_errors = 0;
+    my $ignore_image_numbers = 0;
+    my $tolerance = 100;
+    my $inputdir = '';
+    my $use_stdin = 0;
+
+    # create argument table
+    my @arg_table =
+	(
+	 ["Input options", "section"],
+	 ["-inputdir", "string", 1, \$inputdir,
+	  "Specify directory from which input file names should be read", "<dir>"],
+	 ["-stdin", "boolean", 1, \$use_stdin,
+	  "Read file list from STDIN"],
+
+	 ["Output options", "section"],
+	 ["-compress", "boolean", 1, \$do_compression,
+	  "Compress the output minc files"],
+
+	 ["Converting problematic files", "section"],
+	 ["-ignore_image_errors|-heed_image_errors", "boolean", 1, \$ignore_image_errors,
+	  "Ignore errors when reading images"],
+	 ["-ignore_image_numbers|-use_image_numbers", "boolean", 1, \$ignore_image_numbers,
+	  "Ignore image numbers (sort by slice position)"],
+	 ["-tolerance", "float", 1, \$tolerance,
+	  "Specify a tolerance for slicestep computation (using 0.1 is a good start if you think $prog is severely overestimating the expected number of slices, and thus filling non-existant slices with blank images)", "<tolerance>"],
+
+	 ["General options", "section"],
+	 ["-verbose|-quiet", "boolean", 1, \$verbose,
+	  "Be verbose"],
+	 @format_specific_options,
+	 );
+	 
+    &GetOptions (\@arg_table, \@ARGV, \@input_list) || exit 1;
+
+    $outputdir = shift(@input_list);
+    if (!defined($outputdir)) {
+	die $Usage;
+    }
+
+    # Get input file names from STDIN if needed
+    if ($use_stdin && (scalar(@input_list) > 0)) {
+        die "Do not use -stdin with input files\n";
+    }
+    if ($use_stdin) {
+        print "Reading file list from STDIN\n";
+        while($input_line = <STDIN>) {
+            $input_line =~ s/\n//;
+            push(@input_list, $input_line);
+        }
+        print "Finished reading file list from STDIN\n";
+    }
+
+    # Get input file names from inputdir if needed
+    if ((length($inputdir) > 0) && (scalar(@input_list) > 0)) {
+       die "Do not use -inputdir option with input files or -stdin\n";
+    }
+    if (length($inputdir) > 0) {
+       opendir(DIR, $inputdir) || 
+          die "Error opening input directory \"$inputdir\": $!\n";
+       @input_list = sort(grep(/^[^\.]/, readdir(DIR)));
+       closedir(DIR);
+       local($file);
+       foreach $file (@input_list) {
+          $file = "$inputdir/$file";
+       }
+    }
+
+    # Confirm that we have some input files to work on
+    if (scalar(@input_list) == 0) {
+        die $Usage;
+    }
+
+    # Return values
+    return($outputdir, $do_compression, $ignore_image_errors, 
+           $ignore_image_numbers, $tolerance, @input_list);
+}
+
+# Subroutine to do all the work - loops through files collecting info,
+# then calls routine to create minc file.
+# Because this was the main program, it uses global variables
+sub mri_to_minc {
+    $| = 1;
+
+    # Save arguments for history
+    my ($ARGV, @format_specific_options) = @_;
+    @saved_args = @$ARGV;
+
+    # Get arguments
+    ($outputdir, $do_compression, $ignore_image_errors, 
+     $ignore_image_numbers, $tolerance, @input_list) = 
+         &get_arguments($ARGV, @format_specific_options);
+
+    # Save history
+    chop($history = `date`);
+    $0 =~ /([^\/]+)$/;
+    $history .= ">>>> $1";
+    foreach $file (@input_list[0..$#input_list]) {
+       $bad_args{$file} = 1;
+    }
+    foreach $arg (@saved_args) {
+       if (! $bad_args{$arg}) {
+          $history .= " $arg";
+       }
+    }
+
+    if (scalar(@input_list) > 0) {
+        $history .= " " . join(',', @input_list);
+    }
+    $history .= "\n";
+
+    # Check that we can write to the output directory
+    if (! -d $outputdir) {
+       die "Directory \"$outputdir\" does not exist.\n";
+    }
+    if (! -w $outputdir) {
+       die "Cannot write to \"$outputdir\".\n";
+    }
+
+    # Create a temporary directory
+    &create_tmpdir("mri_to_minc_$$");
+
+    # Loop through files
+    $keep_looping = 1;
+    while ($keep_looping) {
+        # Get next file
+        if ($keep_looping) {
+            $nextfile = shift(@input_list);
+            if (length($nextfile) <= 0) {
+                $keep_looping = 0;
+            }
+        }
+
+        # Read in headers
+        if ($keep_looping) {
+            undef(%file_info);
+            undef(%specific_file_info);
+            if (&read_file_info($nextfile, *file_info, *specific_file_info, $ignore_image_numbers)) {
+                warn "Error reading file \"$nextfile\". Skipping to next.\n";
+                next;
+            } 
+
+            # Get interesting values
+            $cur_numechos = $file_info{'numechos'};
+            $cur_exam = $file_info{'exam'};
+            $cur_series = $file_info{'series'};
+            $cur_echo = $file_info{'echo'};
+	    $cur_acquisition = $file_info{'acquisition'};
+            $cur_image = $file_info{'image'};
+            if ($cur_numechos > 1) {
+               $cur_image = $cur_image * $cur_numechos + 
+                  (($cur_echo <= $cur_numechos) ? $cur_echo : 1);
+            }
+            $cur_width = $file_info{'width'};
+            $cur_height = $file_info{'height'};
+            $cur_slicepos = $file_info{'slicepos'};
+        }
+
+        # Check if number exam or series has changed or if this is the 
+        # last file
+        if ((scalar(keys(%file_list)) > 0) &&
+            (!$keep_looping || 
+             ($mincinfo{'exam'} ne $cur_exam) || 
+             ($mincinfo{'series'} != $cur_series))) {
+
+            # Loop through echos
+            @echos = sort(numeric_order keys(%echo_list));
+            if (scalar(@echos) > $mincinfo{'numechos'}) {
+                $mincinfo{'numechos'} = scalar(@echos);
+            }
+
+            foreach $echo (@echos) {
+
+                # Create minc file
+                ($patient_name = $mincinfo{'patient_name'}) =~
+                    tr/a-zA-Z0-9_/_/cs;             # Use only legal chars
+                $patient_name =~ tr/A-Z/a-z/;         # Lowercase
+                $patient_name =~ s/_*(.*[^_])_*$/$1/; # Remove _ on ends
+                $mincfile = "$outputdir/".$patient_name."_".
+#                    $mincinfo{'exam'}."_".$mincinfo{'series'};
+                    $mincinfo{'exam'} . '_' . sprintf("%06d", $mincinfo{'series'});
+                if ($mincinfo{'numechos'} > 1) {
+                    $mincfile .= "_e$echo";
+                }
+                $mincfile .= "_mri.mnc";
+		$mincfile =~ tr/\/~a-zA-Z0-9_\./_/cs;  # Use only legal chars
+                if (length($listfile) > 0) {
+                    &save_list_info($listfile, $mincfile, *mincinfo, 
+                                    $image_list{$echo}, $echo);
+                }
+
+		# Save history
+		chop($history = `date`);
+		$0 =~ /([^\/]+)$/;
+		$history .= ">>>> $1";
+		foreach $file (@input_list[0..$#input_list]) {
+		    $bad_args{$file} = 1;
+		}
+		foreach $arg (@saved_args) {
+		    if (! $bad_args{$arg}) {
+			$history .= " $arg";
+		    }
+		}
+		
+		if (scalar(@input_list) > 0) {
+		    my @images = split($;, $image_list{$cur_echo});
+		    foreach my $image (@images) {
+			$history .= " " . basename($file_list{$image});
+		    }
+		}
+		$history .= "\n";
+		$mincinfo{'history'} = $history;
+		
+		# create the minc
+		print STDERR "Creating minc file \"$mincfile\"\n";
+		$mincfile = 
+		    &create_mincfile($mincfile, *file_list, *mincinfo, 
+				     $image_list{$echo}, $echo, $tolerance);
+		if ($do_compression) {
+		    print STDERR "Compressing file \"$mincfile\"\n";
+		    system("gzip $mincfile");
+		}
+            }
+        $new_seq=$new_seq+1;
+            # reset variables
+            undef(%file_list);
+            undef(%echo_list);
+            undef(%image_list);
+            undef(%mincinfo);
+        }
+
+        # Break out here if stopping loop
+        if (!$keep_looping) {next;}
+
+        # If first file, then save appropriate info
+        if (scalar(keys(%file_list)) <= 0) {
+            $mincinfo{'history'} = $history;
+            $mincinfo{'numechos'} = $cur_numechos;
+            $mincinfo{'exam'} = $cur_exam;
+            $mincinfo{'series'} = $cur_series;
+            $mincinfo{'width'} = $cur_width;
+            $mincinfo{'height'} = $cur_height;
+            $mincinfo{'pixel_size'} = $file_info{'pixel_size'};
+            $mincinfo{'patient_name'} = $file_info{'patient_name'};
+            $mincinfo{'orientation'} = $file_info{'orientation'};
+            $mincinfo{'tr'} = $file_info{'tr'};
+            $mincinfo{'ti'} = $file_info{'ti'};
+            $mincinfo{'mr_flip'} = $file_info{'mr_flip'};
+            $mincinfo{'scan_seq'} = $file_info{'scan_seq'};
+            $mincinfo{'ge_pseq'} = $file_info{'ge_pseq'};
+            $mincinfo{'ge_pseqmode'} = $file_info{'ge_pseqmode'};
+            $mincinfo{'start_time'} = $file_info{'start_time'};
+            $mincinfo{'institution'} = $file_info{'institution'};
+            $mincinfo{'patient_birthdate'} = $file_info{'patient_birthdate'};
+            $mincinfo{'patient_age'} = $file_info{'patient_age'};
+            $mincinfo{'patient_sex'} = $file_info{'patient_sex'};
+            $mincinfo{'patient_id'} = $file_info{'patient_id'};
+            $mincinfo{'colstep'} = $file_info{'colstep'};
+            $mincinfo{'rowstep'} = $file_info{'rowstep'};
+            $mincinfo{'colstart'} = $file_info{'colstart'};
+            $mincinfo{'rowstart'} = $file_info{'rowstart'};
+            $mincinfo{'col_dircos_x'} = $file_info{'col_dircos_x'};
+            $mincinfo{'col_dircos_y'} = $file_info{'col_dircos_y'};
+            $mincinfo{'col_dircos_z'} = $file_info{'col_dircos_z'};
+            $mincinfo{'row_dircos_x'} = $file_info{'row_dircos_x'};
+            $mincinfo{'row_dircos_y'} = $file_info{'row_dircos_y'};
+            $mincinfo{'row_dircos_z'} = $file_info{'row_dircos_z'};
+            $mincinfo{'slc_dircos_x'} = $file_info{'slc_dircos_x'};
+            $mincinfo{'slc_dircos_y'} = $file_info{'slc_dircos_y'};
+            $mincinfo{'slc_dircos_z'} = $file_info{'slc_dircos_z'};
+
+            # Save dicom element information
+            local(@elements) = sort(grep(/^dicom_/, keys(%file_info)));
+            local($element);
+            foreach $element (@elements) {
+               $mincinfo{$element} = $file_info{$element};
+            }
+
+        }
+        else {
+            if (($cur_width != $mincinfo{'width'}) || # 
+                ($cur_height != $mincinfo{'height'})) {
+                warn "Width or height do not match first file ".
+                    "for file $nextfile. Skipping to next.\n";
+                next;
+            }
+        }
+
+        # Save echo number
+        if (!defined($mincinfo{'te', $cur_echo})) {
+            $mincinfo{'te', $cur_echo} = $file_info{'te'};
+        }
+
+        # Save info for all files
+        foreach $key (keys(%specific_file_info)) {
+            $mincinfo{$cur_image, 'specific', $key} =
+                $specific_file_info{$key};
+        }
+        $mincinfo{$cur_image, 'slicepos'} = $cur_slicepos;
+
+        # Keep track of files, image numbers and echo numbers
+        $file_list{$cur_image} = $nextfile;
+        $echo_list{$cur_echo} = '';
+        if (defined($image_list{$cur_echo})) {$image_list{$cur_echo} .= $; ;}
+        $image_list{$cur_echo} .= $cur_image;
+
+    }
+
+    &cleanup_and_die();
+}
+
+# Code for reading generic dicom files for conversion to minc.
+
+use DICOM;
+
+# Routine to split a DICOM list into a perl list
+sub split_dicom_list {
+    my($dlist) = @_;
+    my(@values) = split(/\\/, $dlist);
+    foreach $value (@values) {
+	$value += 0;
+    }
+
+    return (scalar(@values) > 1) ? @values : $values[0];
+}
+
+# Routine to convert world coordinates
+sub convert_coordinates {
+    my(@coords) = @_;
+    $coords[0] *= -1;
+    $coords[1] *= -1;
+    return @coords;
+}
+
+# Routine to compute a dot product from two arrayrefs
+sub vector_dot_product {
+    my($vec1, $vec2) = @_;
+    my($result, $i);
+    $result = 0;
+    for $i (0..2) {
+        $result += $$vec1[$i] * $$vec2[$i];
+    }
+    return $result;
+}
+
+# Routine to compute a vector cross product from two arrayrefs
+sub vector_cross_product {
+    my($vec1, $vec2) = @_;
+    my(@result);
+    $#result = 2;
+    $result[0] = $$vec1[1] * $$vec2[2] - $$vec1[2] * $$vec2[1];
+    $result[1] = $$vec1[2] * $$vec2[0] - $$vec1[0] * $$vec2[2];
+    $result[2] = $$vec1[0] * $$vec2[1] - $$vec1[1] * $$vec2[0];
+    return @result;
+}
+
+# Routine to get Dicom 3 file info
+sub dicom3_read_file_info {
+    if (scalar(@_) != 4) {
+        &cleanup_and_die("Argument error in read_file_info",1);
+    }
+    local($filename, *file_info, *specific_file_info, $ignore_image_numbers) = @_;
+
+    # Get headers
+    print "Reading headers from file \"$filename\"\n";
+    my $DICOM = DICOM->new();
+    $DICOM->fill($filename, $Image_is_big_endian);
+
+    # Get interesting values
+    $file_info{'numechos'} = 1;
+    if ($file_info{'numechos'} <= 0) {$file_info{'numechos'} = 1;}
+    # ExamNumber = 0x0020, 0x0010
+    $file_info{'exam'} = &trim($DICOM->value('0020', '0010'));
+    if (length($file_info{'exam'}) == 0) {
+	# using AcquisitionDate (0x0008, 0x0022) if no ExamNumber exists
+	$file_info{'exam'} = &trim($DICOM->value('0008', '0022'));
+    }
+    $file_info{'exam'} =~ s/\W//g;
+    # SeriesNumber (0x0020, 0x0011)
+    local($series) = &trim($DICOM->value('0020', '0011'));
+    # Acquisitionnumber (0x0020, 0x0012)
+    local($acquisition) = &trim($DICOM->value('0020', '0012'));
+    $file_info{'acquisition'} = $acquisition;
+    local($the_series);
+    if (($series > 0) && ($acquisition > 0)) {
+       $the_series = $series*1000+$acquisition;
+    }
+    elsif ($series > 0) {$the_series = $series;}
+    else {$the_series = $acquisition;}
+    $file_info{'series'} = $the_series;
+    # ImageNumber (0x0020, 0x0013)
+    local($the_image) = &trim($DICOM->value('0020', '0013'));
+    if (!defined($the_image) || (length($the_image) == 0)) {
+       if (!defined($Image_Counter)) {        # Global variable
+          $Image_Counter = 1;
+       }
+       $the_image = $Image_Counter++;
+    }
+    $file_info{'image'} = $the_image;
+
+    # EchoNumber (0x0018, 0x0086)
+    $file_info{'echo'} = &trim($DICOM->value('0018', '0086'));
+    # Columns (0x0028, 0x0011)
+    $file_info{'width'} = &trim($DICOM->value('0028', '0011'));
+    # Rows (0x0028, 0x0010)
+    $file_info{'height'} = &trim($DICOM->value('0028', '0010'));
+    
+    # BitsAllocated (0x0028, 0x0100)
+    local($bits_alloc) = &trim($DICOM->value('0028', '0100'));
+    if ($bits_alloc == 16) {
+       $file_info{'pixel_size'} = 2;
+    }
+    elsif ($bits_alloc == 8) {
+       $file_info{'pixel_size'} = 1;
+    }
+    else {
+       warn "Wrong number of bits allocated per image ($bits_alloc)\n";
+       return 1;
+    }
+    # PatientName (0x0010, 0x0010)
+    $file_info{'patient_name'} = &trim($DICOM->value('0010', '0010'));
+
+    # Get slice position and orientation (row and column vectors)
+    local(@position) = 
+	# ImagePositionPatient (0x0020, 0x0032)
+        &convert_coordinates(&split_dicom_list(&trim($DICOM->value('0020', '0032'))));
+    if (scalar(@position) != 3) {
+       warn "************** Error reading slice position ***************\n";
+    }
+    # ImageOrientationPatient (0x0020, 0x0037)
+    local(@array) = &split_dicom_list(&trim($DICOM->value('0020', '0037')));
+    if (scalar(@array) != 6) {
+       warn "************* Error reading slice orientation *************\n";
+    }
+    local(@column) = &convert_coordinates(@array[0..2]);
+    local(@row) = &convert_coordinates(@array[3..5]);
+
+    # Figure out normal and orientation
+    local(@normal) = 
+       &vector_cross_product(\@column, \@row);
+    local($norm_r) = abs($normal[0]);
+    local($norm_a) = abs($normal[1]);
+    local($norm_s) = abs($normal[2]);
+    local($plane) = 'transverse';
+    local($max) = $norm_s;
+    if ($norm_r > $max) {
+        $plane = 'sagittal';
+        $max = $norm_r;
+    }
+    if ($norm_a > $max) {
+        $plane = 'coronal';
+        $max = $norm_a;
+    }
+    $file_info{'orientation'} = $plane;
+
+    # Get coordinate information
+    local(@col_dircos, @row_dircos, @slc_dircos);
+    ($file_info{'rowstep'}, $file_info{'colstep'}) = 
+	# PixelSpacing (0x0028, 0x0030)
+	&split_dicom_list(&trim($DICOM->value('0028', '0030')));
+    if (length($file_info{'rowstep'}) <= 0) {
+       $file_info{'colstep'} = $file_info{'rowstep'} = 1;
+    }
+    $file_info{'colstep'} *= -1.0;
+    $file_info{'rowstep'} *= -1.0;
+    @col_dircos = &get_dircos(@column);
+    @row_dircos = &get_dircos(@row);
+    @slc_dircos = &get_dircos(@normal);
+    $file_info{'slicepos'} = &vector_dot_product(\@position, \@slc_dircos);
+
+    # Use slicepos instead of image number if -ignore_image_numbers
+    if($ignore_image_numbers) { 
+        print "Ignoring image number ".$file_info{'image'}." using ";
+        $file_info{'image'} = sprintf("%.2f", $file_info{'slicepos'});
+        print $file_info{'image'}."\n";
+    }
+
+    $file_info{'colstart'} = &vector_dot_product(\@position, \@col_dircos)
+       + $file_info{'colstep'} / 2;
+    $file_info{'rowstart'} = &vector_dot_product(\@position, \@row_dircos)
+       + $file_info{'rowstep'} / 2;
+    $file_info{'col_dircos_x'} = $col_dircos[0];
+    $file_info{'col_dircos_y'} = $col_dircos[1];
+    $file_info{'col_dircos_z'} = $col_dircos[2];
+    $file_info{'row_dircos_x'} = $row_dircos[0];
+    $file_info{'row_dircos_y'} = $row_dircos[1];
+    $file_info{'row_dircos_z'} = $row_dircos[2];
+    $file_info{'slc_dircos_x'} = $slc_dircos[0];
+    $file_info{'slc_dircos_y'} = $slc_dircos[1];
+    $file_info{'slc_dircos_z'} = $slc_dircos[2];
+
+    # Get other info
+    # RepetitionTime (0x0018, 0x0080)
+    $file_info{'tr'} = &trim($DICOM->value('0018', '0080'))/1000;
+    # EchoTime (0x0018, 0x0081)
+    $file_info{'te'} = &trim($DICOM->value('0018', '0081'))/1000;
+    # InversionTime (0x0018, 0x0082)
+    $file_info{'ti'} = &trim($DICOM->value('0018', '0082'))/1000;
+    # FlipAngle (0x0018, 0x1314)
+    $file_info{'mr_flip'} = &trim($DICOM->value('0018', '1314'));
+    ($file_info{'patient_birthdate'} = 
+     # PatientBirthDate (0x0010, 0x0030)
+       &trim($DICOM->value('0010', '0030'))) =~ s/\./-/g;
+    # PatientAge (0x0010, 0x1010)
+    ($file_info{'patient_age'} = &trim($DICOM->value('0010', '1010')))
+        =~ s/\D//g;
+    # PatientSex (0x0010, 0x0040)
+    local($sex_flag) = &trim($DICOM->value('0010', '0040'));
+    if ($sex_flag eq 'M ') {
+        $file_info{'patient_sex'} = "male__";
+    }
+    elsif ($sex_flag eq 'F ') {
+        $file_info{'patient_sex'} = "female";
+    }
+    # PatientID (0x0010, 0x0020)
+    $file_info{'patient_id'} = &trim($DICOM->value('0010', '0020'));
+    # InstitutionName (0x0008, 0x0080)
+    $file_info{'institution'} = &trim($DICOM->value('0008', '0080'));
+    local($study_date, $study_time);
+    # AcquisitionDate (0x0008, 0x0022)
+    ($study_date = &trim($DICOM->value('0008', '0022'))) =~ s/\./-/g;
+    # AcquisitionTime (0x0008, 0x0032)
+    $study_time = &trim($DICOM->value('0008', '0032'));
+    $file_info{'start_time'} = "$study_date $study_time";
+
+    # Get dicom element info - only even numbered groups
+    local(@elements) = $DICOM->contents();
+    local($element);
+    foreach $element (@elements) {
+	local($group) = $$element[0];
+	local($element) = $$element[1];
+	if(hex($group) > 32511 || hex($group) % 2 != 0) {next;}
+	local($value) = $DICOM->value($group, $element);
+	if(defined($value) && length($value) > 0) {
+	    $file_info{"dicom_0x$group:el_0x$element"} = $value;
+	}
+    }
+
+    # Get specific file info
+    # CompressionCode (0x0028, 0x0060)
+    local($compression_code) = &trim($DICOM->value('0028', '0060'));
+    undef $DICOM;
+    if (($compression_code ne "NONE") && ($compression_code ne "")) {
+       warn "File is compressed\n";
+       return 1;
+    }
+    ($specific_file_info{'pixel_data_group'}, 
+     # PixelData (0x7FE0, 0x0010)
+     $specific_file_info{'pixel_data_element'}) = ("0x7FE0", "0x0010");
+    $specific_file_info{'file_offset'} = $header{'file_offset'};
+    $specific_file_info{'pixel_size'} = $file_info{'pixel_size'};
+    
+    return 0;
+}
+
+sub trim {
+    local($input) = @_;
+    $input =~ s/^\s+//;
+    $input =~ s/\s+$//;
+    return $input;
+}
+
+# MAIN PROGRAM
+
+*read_file_info = *dicom3_read_file_info;
+
+# Check for dicom-specific arguments
+my $Image_is_big_endian = 0;
+
+# define DICOM specific arguments
+my @dicom_specific_args = (
+		      ["Dicom-specific options", "section"],
+# explicit endian-ness: should be almost always replaced by automatic lilliputan logic.
+		      ["-big_endian_image|-little_endian_image", "boolean", 1, \$Image_is_big_endian,
+		       "Specify the endian-ness of the image"],
+		      );
+&mri_to_minc(\@ARGV, @dicom_specific_args);
+
